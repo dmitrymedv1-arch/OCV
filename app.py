@@ -1,6 +1,8 @@
 """
 OCV-based Transport Number Estimation for Proton-Conducting Electrolytes
 Streamlit application for estimating ionic transport numbers from OCV measurements.
+
+Версия с усиленной защитой от протечек session_state и встроенной диагностикой.
 """
 
 import streamlit as st
@@ -89,38 +91,30 @@ st.set_page_config(
 
 def initialize_session_state():
     defaults = {
-        # Режим эксперимента
-        'mode': 'A',   # A: OCV(T), B: OCV(p'H2O) при T=const, C: OCV(p''H2O) при T=const
-
-        # Данные
-        'experimental_data': None,   # np.array([[x, OCV], ...])
+        'mode': 'A',
+        'experimental_data': None,
         'data_loaded': False,
         'analysis_done': False,
 
-        # Параметры газа
-        'air_pH2O_mode': 'bubbler',      # 'bubbler' или 'direct'
+        'air_pH2O_mode': 'bubbler',
         'air_bubbler_T': 25.0,
         'air_pH2O_direct': 0.0313,
 
         'fuel_pH2O_mode': 'bubbler',
         'fuel_bubbler_T': 25.0,
         'fuel_pH2O_direct': 0.0313,
-        'fuel_H2_fraction': 1.0,          # мольная доля H2 в сухом топливе (остальное - inert)
+        'fuel_H2_fraction': 1.0,
 
-        # Для режимов B и C
-        'fixed_T_BC': 700.0,              # °C
+        'fixed_T_BC': 700.0,
 
-        # Результаты
         'results': None,
 
-        # Параметры перебора в сценарии 3
         'grid_step': 0.01,
-        'tolerance_mode': 'auto',         # 'auto' или 'manual'
+        'tolerance_mode': 'auto',
         'tolerance_value_mV': 5.0,
         'min_solutions': 10,
         'max_tolerance_mV': 50.0,
 
-        # Стиль графиков
         'style': {
             'scenario1_color': '#1f77b4',
             'scenario2_color': '#2ca02c',
@@ -149,6 +143,7 @@ initialize_session_state()
 
 def logK(T_C: float) -> float:
     """log10 K для реакции H2O = H2 + 0.5 O2, T в °C."""
+    T_C = float(T_C)
     T_K = T_C + 273.15
     return (-1783.32 + 0.40561 * T_K) / (1 + 0.135996 * T_K)
 
@@ -160,11 +155,20 @@ def K_eq(T_C: float) -> float:
 
 def pH2O_from_bubbler(T_bubbler_C: float) -> float:
     """Парциальное давление H2O по температуре барботёра (интерполяция таблицы)."""
+    T_bubbler_C = float(T_bubbler_C)
     if T_bubbler_C <= T_BUBBLER[0]:
         return float(PH2O_TABLE[0])
     if T_bubbler_C >= T_BUBBLER[-1]:
         return float(PH2O_TABLE[-1])
     return float(np.interp(T_bubbler_C, T_BUBBLER, PH2O_TABLE))
+
+
+def _clamp_pH2O(x: float) -> float:
+    """Принудительное приведение pH2O к допустимому диапазону."""
+    x = float(x)
+    if not np.isfinite(x):
+        return np.nan
+    return min(max(x, 1e-9), 0.999)
 
 
 def compute_pressures(T_C: float,
@@ -174,30 +178,39 @@ def compute_pressures(T_C: float,
                      ) -> Dict[str, float]:
     """
     Расчёт парциальных давлений на обеих сторонах.
-
-    Воздух (катод): p'O2 = 0.21*(1-p'H2O); p'H2 = K*p'H2O / sqrt(p'O2)
-    Топливо (анод):
-        - чистый H2: p''O2 = [K*p''H2O/(1-p''H2O)]^2
-        - H2 + inert (ig): p''H2 = fuel_H2_fraction*(1-p''H2O);
-                           p''O2 = [K*p''H2O/(p''H2*(1-p''H2O))]^2
-    Все давления - в долях от общего (безразмерные).
+    Все входы принудительно приводятся к float и clamp.
     """
+    T_C = float(T_C)
+    air_pH2O = _clamp_pH2O(air_pH2O)
+    fuel_pH2O = _clamp_pH2O(fuel_pH2O)
+    fuel_H2_fraction = float(fuel_H2_fraction)
+    fuel_H2_fraction = min(max(fuel_H2_fraction, 1e-6), 1.0)
+
     K = K_eq(T_C)
 
-    # Воздух
+    # Воздух (катод)
     pO2_air = 0.21 * (1.0 - air_pH2O)
-    pH2_air = K * air_pH2O / np.sqrt(pO2_air) if pO2_air > 0 else 0.0
+    if pO2_air > 0:
+        pH2_air = K * air_pH2O / np.sqrt(pO2_air)
+    else:
+        pH2_air = 0.0
 
-    # Топливо
+    # Топливо (анод)
     if fuel_H2_fraction >= 1.0 - 1e-9:
-        # чистый H2 + H2O
-        pO2_fuel = (K * fuel_pH2O / (1.0 - fuel_pH2O)) ** 2 if fuel_pH2O < 1.0 else 0.0
+        # чистый H2 + H2O (без инертного газа)
+        if fuel_pH2O < 1.0:
+            pO2_fuel = (K * fuel_pH2O / (1.0 - fuel_pH2O)) ** 2
+        else:
+            pO2_fuel = 0.0
         pH2_fuel = 1.0 - fuel_pH2O
     else:
         # H2 + inert + H2O
         pH2_fuel = fuel_H2_fraction * (1.0 - fuel_pH2O)
         denom = pH2_fuel * (1.0 - fuel_pH2O)
-        pO2_fuel = (K * fuel_pH2O / denom) ** 2 if denom > 0 else 0.0
+        if denom > 0:
+            pO2_fuel = (K * fuel_pH2O / denom) ** 2
+        else:
+            pO2_fuel = 0.0
 
     return {
         'pO2_air': pO2_air,
@@ -206,13 +219,14 @@ def compute_pressures(T_C: float,
         'pH2_fuel': pH2_fuel,
         'air_pH2O': air_pH2O,
         'fuel_pH2O': fuel_pH2O,
+        'fuel_H2_fraction': fuel_H2_fraction,
         'K': K
     }
 
 
 def EO_value(T_C: float, p: Dict[str, float]) -> float:
     """Термодинамическая ЭДС кислородионной ячейки, В."""
-    T_K = T_C + 273.15
+    T_K = float(T_C) + 273.15
     if p['pO2_air'] <= 0 or p['pO2_fuel'] <= 0:
         return np.nan
     return R_GAS * T_K / (4.0 * F_FARADAY) * np.log(p['pO2_air'] / p['pO2_fuel'])
@@ -220,7 +234,7 @@ def EO_value(T_C: float, p: Dict[str, float]) -> float:
 
 def EH_value(T_C: float, p: Dict[str, float]) -> float:
     """Термодинамическая ЭДС протонной ячейки (классическая форма), В."""
-    T_K = T_C + 273.15
+    T_K = float(T_C) + 273.15
     if p['pH2_air'] <= 0 or p['pH2_fuel'] <= 0:
         return np.nan
     return R_GAS * T_K / (2.0 * F_FARADAY) * np.log(p['pH2_fuel'] / p['pH2_air'])
@@ -228,7 +242,7 @@ def EH_value(T_C: float, p: Dict[str, float]) -> float:
 
 def EH2O_value(T_C: float, p: Dict[str, float]) -> float:
     """ЭДС в форме через влажности, В."""
-    T_K = T_C + 273.15
+    T_K = float(T_C) + 273.15
     if p['air_pH2O'] <= 0 or p['fuel_pH2O'] <= 0:
         return np.nan
     return R_GAS * T_K / (2.0 * F_FARADAY) * np.log(p['fuel_pH2O'] / p['air_pH2O'])
@@ -239,24 +253,20 @@ def EH2O_value(T_C: float, p: Dict[str, float]) -> float:
 # ============================================
 
 def scenario_1(Emeas: float, EH: float) -> Optional[Dict[str, float]]:
-    """
-    Сценарий ❶: H+ + e-.
-        tH = Emeas / EH,  tion = tH, te = 1 - tH.
-    """
-    if EH is None or np.isnan(EH) or abs(EH) < 1e-9:
+    """Сценарий ❶: H+ + e-. tH = Emeas/EH."""
+    if EH is None or not np.isfinite(EH) or abs(EH) < 1e-9:
         return None
     tH = Emeas / EH
     if tH < 0.0 or tH > 1.0:
-        return None   # нефизично
+        return None
     return {'tH': tH, 'tO': 0.0, 'tion': tH, 'te': 1.0 - tH}
 
 
 def scenario_2(Emeas: float, EO: float, EH: float) -> Optional[Dict[str, float]]:
-    """
-    Сценарий ❷: O2- + H+.
-        tH = (Emeas - EO)/(EH - EO),  tO = 1 - tH, te = 0.
-    """
-    if EH is None or EO is None or np.isnan(EH) or np.isnan(EO):
+    """Сценарий ❷: O2- + H+. tH = (Emeas - EO)/(EH - EO)."""
+    if EH is None or EO is None:
+        return None
+    if not np.isfinite(EH) or not np.isfinite(EO):
         return None
     if abs(EH - EO) < 1e-9:
         return None
@@ -268,14 +278,9 @@ def scenario_2(Emeas: float, EO: float, EH: float) -> Optional[Dict[str, float]]
 
 
 def scenario_3_grid(Emeas: float, EO: float, EH2O: float,
-                   step: float = 0.01
-                   ) -> List[Dict[str, float]]:
-    """
-    Сценарий ❸: численный перебор (ti, tH) с шагом step.
-    Условие: Emeas ≈ ti*EO + tH*EH2O, ti = tion, tO = ti - tH >= 0, ti <= 1.
-    Возвращает список точек (ti, tH, tO, te, err).
-    """
-    if np.isnan(EO) or np.isnan(EH2O):
+                   step: float = 0.01) -> List[Dict[str, float]]:
+    """Сценарий ❸: численный перебор (ti, tH)."""
+    if not np.isfinite(EO) or not np.isfinite(EH2O):
         return []
 
     solutions = []
@@ -301,18 +306,13 @@ def scenario_3_grid(Emeas: float, EO: float, EH2O: float,
 def filter_solutions_by_tolerance(solutions: List[Dict[str, float]],
                                   tolerance: float
                                   ) -> List[Dict[str, float]]:
-    """Отбор решений с |err| <= tolerance."""
     return [s for s in solutions if abs(s['err']) <= tolerance]
 
 
 def auto_select_tolerance(Emeas: float, EO: float, EH2O: float,
                          step: float, min_solutions: int,
-                         max_tol: float, n_scan: int = 200
-                         ) -> float:
-    """
-    Автоподбор допуска δ: минимальный δ такой, что число решений >= min_solutions.
-    Если решений нет даже при max_tol - возвращаем max_tol.
-    """
+                         max_tol: float) -> float:
+    """Автоподбор δ: минимальное δ, дающее >= min_solutions решений."""
     sols = scenario_3_grid(Emeas, EO, EH2O, step=step)
     if not sols:
         return max_tol
@@ -345,48 +345,73 @@ def run_analysis(data: np.ndarray,
                 ) -> Dict[str, Any]:
     """
     Прогон всех трёх сценариев для каждой точки данных.
-
-    data - np.array([[x, OCV], ...], где x = T (°C) в режиме A,
-                                              p'H2O в режиме B,
-                                              p''H2O в режиме C.
+    Все параметры передаются явно, без обращения к st.session_state.
     """
-    xs = data[:, 0]
-    ocvs = data[:, 1]
+    xs = np.asarray(data[:, 0], dtype=float)
+    ocvs = np.asarray(data[:, 1], dtype=float)
 
     scenario1, scenario2, scenario3 = [], [], []
     s3_grids = []
 
-    for x, ocv in zip(xs, ocvs):
-        # Определяем T, air_pH2O, fuel_pH2O для этой точки
+    # Отладочный вывод всех входных параметров
+    print("=" * 70)
+    print(f"[RUN_ANALYSIS] mode={mode}")
+    print(f"[RUN_ANALYSIS] fixed_T_BC={fixed_T_BC}")
+    print(f"[RUN_ANALYSIS] air_pH2O={air_pH2O}")
+    print(f"[RUN_ANALYSIS] fuel_pH2O={fuel_pH2O}")
+    print(f"[RUN_ANALYSIS] fuel_H2_fraction={fuel_H2_fraction}")
+    print(f"[RUN_ANALYSIS] grid_step={grid_step}, "
+          f"tol_mode={tolerance_mode}, tol_mV={tolerance_value_mV}, "
+          f"min_sol={min_solutions}, max_tol_mV={max_tolerance_mV}")
+    print(f"[RUN_ANALYSIS] N points = {len(xs)}")
+    print("=" * 70)
+
+    for idx_pt, (x, ocv) in enumerate(zip(xs, ocvs)):
+        x = float(x)
+        ocv = float(ocv)
+
+        # Определяем T_C, p_air, p_fuel для этой точки
         if mode == 'A':
-            T_C = float(x)
+            T_C = x
             p_air = air_pH2O
             p_fuel = fuel_pH2O
         elif mode == 'B':
             T_C = float(fixed_T_BC)
-            p_air = float(x)          # влажность воздуха из данных
-            p_fuel = fuel_pH2O        # фиксированная влажность топлива
+            p_air = x
+            p_fuel = fuel_pH2O
         elif mode == 'C':
             T_C = float(fixed_T_BC)
-            p_air = air_pH2O          # фиксированная влажность воздуха
-            p_fuel = float(x)         # влажность топлива из данных
+            p_air = air_pH2O
+            p_fuel = x
         else:
-            T_C, p_air, p_fuel = float(x), air_pH2O, fuel_pH2O
+            T_C = x
+            p_air = air_pH2O
+            p_fuel = fuel_pH2O
 
         p = compute_pressures(T_C, p_air, p_fuel, fuel_H2_fraction)
         EO = EO_value(T_C, p)
         EH = EH_value(T_C, p)
         EH2O = EH2O_value(T_C, p)
 
+        # Отладочный вывод промежуточных величин
+        print(f"[PT {idx_pt}] x={x:.6g}, ocv={ocv:.6f}")
+        print(f"  T_C={T_C:.2f}, p_air={p_air:.6f}, p_fuel={p_fuel:.6f}, "
+              f"H2_frac={fuel_H2_fraction:.4f}")
+        print(f"  K(T)={p['K']:.6e}")
+        print(f"  p'O2={p['pO2_air']:.6e}, p'H2={p['pH2_air']:.6e}")
+        print(f"  p''O2={p['pO2_fuel']:.6e}, p''H2={p['pH2_fuel']:.6e}")
+        print(f"  EO={EO:.6f}, EH={EH:.6f}, EH2O={EH2O:.6f}")
+
         s1 = scenario_1(ocv, EH)
         s2 = scenario_2(ocv, EO, EH)
         scenario1.append(s1)
         scenario2.append(s2)
+        print(f"  s1={s1}")
+        print(f"  s2={s2}")
 
-        # Сценарий 3 - перебор
+        # Сценарий 3
         grid = scenario_3_grid(ocv, EO, EH2O, step=grid_step)
 
-        # Допуск
         if tolerance_mode == 'auto':
             tol_V = auto_select_tolerance(ocv, EO, EH2O,
                                           step=grid_step,
@@ -396,9 +421,18 @@ def run_analysis(data: np.ndarray,
             tol_V = tolerance_value_mV * 1e-3
 
         sols = filter_solutions_by_tolerance(grid, tol_V)
+        print(f"  s3: tol={tol_V*1e3:.3f} mV, N_sol={len(sols)}")
 
         s3_grids.append({
             'T_C': T_C,
+            'K': p['K'],
+            'pO2_air': p['pO2_air'],
+            'pH2_air': p['pH2_air'],
+            'pO2_fuel': p['pO2_fuel'],
+            'pH2_fuel': p['pH2_fuel'],
+            'air_pH2O_used': p['air_pH2O'],
+            'fuel_pH2O_used': p['fuel_pH2O'],
+            'fuel_H2_fraction_used': p['fuel_H2_fraction'],
             'EO': EO, 'EH': EH, 'EH2O': EH2O,
             'OCV': ocv,
             'tolerance_V': tol_V,
@@ -437,15 +471,15 @@ def run_analysis(data: np.ndarray,
         'scenario2': scenario2,
         'scenario3': scenario3,
         's3_grids': s3_grids,
-        'fixed_T_BC': fixed_T_BC,
-        'air_pH2O': air_pH2O,
-        'fuel_pH2O': fuel_pH2O,
-        'fuel_H2_fraction': fuel_H2_fraction,
-        'grid_step': grid_step,
+        'fixed_T_BC': float(fixed_T_BC),
+        'air_pH2O': float(air_pH2O) if np.isfinite(air_pH2O) else np.nan,
+        'fuel_pH2O': float(fuel_pH2O) if np.isfinite(fuel_pH2O) else np.nan,
+        'fuel_H2_fraction': float(fuel_H2_fraction),
+        'grid_step': float(grid_step),
         'tolerance_mode': tolerance_mode,
-        'tolerance_value_mV': tolerance_value_mV,
-        'min_solutions': min_solutions,
-        'max_tolerance_mV': max_tolerance_mV
+        'tolerance_value_mV': float(tolerance_value_mV),
+        'min_solutions': int(min_solutions),
+        'max_tolerance_mV': float(max_tolerance_mV)
     }
 
 
@@ -462,7 +496,6 @@ def _x_label(mode: str) -> str:
 
 
 def _extract_series(results: Dict[str, Any], key: str) -> np.ndarray:
-    """Извлекает массив значений для графика: пропуски → NaN."""
     xs = results['xs']
     out = np.full_like(xs, np.nan, dtype=float)
 
@@ -489,7 +522,6 @@ def _extract_series(results: Dict[str, Any], key: str) -> np.ndarray:
 
 
 def _plot_common_band(ax, xs, arrays, color, alpha):
-    """Закрашивает область пересечения [min, max] по всем непустым массивам."""
     mins, maxs = [], []
     for arr in arrays:
         v = arr[~np.isnan(arr)]
@@ -525,18 +557,15 @@ def _plot_common_band(ax, xs, arrays, color, alpha):
 # ============================================
 
 def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.Figure:
-    """Сводный график: tH, tO, tion по трём сценариям с закраской совпадений."""
     xs = results['xs']
     xlabel = _x_label(results['mode'])
 
-    # ЯВНО определяем границы оси X по данным
     x_pad = 0.02 * (xs.max() - xs.min()) if xs.max() > xs.min() else 1.0
     xlim = (xs.min() - x_pad, xs.max() + x_pad)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharex=True)
     titles = ['tH (proton)', 'tO (oxide-ion)', 'tion = tH + tO']
 
-    # --- tH ---
     s1_tH = _extract_series(results, 'tH')
     s2_tH = _extract_series(results, 's2_tH')
     s3_tH_min = _extract_series(results, 's3_tH_min')
@@ -567,7 +596,6 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.legend(loc='best', fontsize=8)
 
-    # --- tO ---
     s2_tO = _extract_series(results, 's2_tO')
     s3_tO_min = _extract_series(results, 's3_tO_min')
     s3_tO_max = _extract_series(results, 's3_tO_max')
@@ -589,7 +617,6 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.legend(loc='best', fontsize=8)
 
-    # --- tion ---
     s1_tion = s1_tH.copy()
     s2_tion = np.ones_like(xs)
     for i, s in enumerate(results['scenario2']):
@@ -629,7 +656,6 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
 
 def create_scenario_plot(results: Dict[str, Any], scenario_idx: int,
                         style: Dict[str, Any]) -> plt.Figure:
-    """Отдельный график для одного сценария."""
     xs = results['xs']
     xlabel = _x_label(results['mode'])
 
@@ -713,7 +739,6 @@ def create_scenario_plot(results: Dict[str, Any], scenario_idx: int,
 
 
 def create_te_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.Figure:
-    """Отдельный график для te по всем трём сценариям."""
     xs = results['xs']
     xlabel = _x_label(results['mode'])
 
@@ -770,7 +795,6 @@ def create_te_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.Figure
 def create_decision_map_scatter(grid_solutions: List[Dict[str, float]],
                                EO: float, EH2O: float, Emeas: float,
                                style: Dict[str, Any]) -> plt.Figure:
-    """Карта решений: вариант 1 - точки (ti, tH), раскрашенные по te."""
     fig, ax = plt.subplots(figsize=(6, 5))
 
     if grid_solutions:
@@ -804,7 +828,6 @@ def create_decision_map_scatter(grid_solutions: List[Dict[str, float]],
 
 def create_decision_map_contour(EO: float, EH2O: float, Emeas: float,
                                style: Dict[str, Any]) -> plt.Figure:
-    """Карта решений: вариант 2 - линии уровня E_model(ti, tH)."""
     fig, ax = plt.subplots(figsize=(6, 5))
 
     ti_vals = np.linspace(0, 1, 200)
@@ -878,7 +901,6 @@ def main():
     st.title("⚡ OCV Transport Number Analysis")
     st.markdown("Оценка чисел переноса протонпроводящих электролитов по данным OCV")
 
-    # ----- Sidebar -----
     with st.sidebar:
         st.header("1. Режим эксперимента")
         mode = st.radio(
@@ -889,27 +911,33 @@ def main():
                 'B': "B. OCV(p'H₂O) — варьируется воздух",
                 'C': "C. OCV(p''H₂O) — варьируется топливо"
             }[x],
-            index=['A', 'B', 'C'].index(st.session_state.mode)
+            index=['A', 'B', 'C'].index(st.session_state.mode),
+            key='mode_radio'
         )
         st.session_state.mode = mode
 
+        fixed_T_BC = None
         if mode in ('B', 'C'):
-            st.session_state.fixed_T_BC = st.number_input(
+            fixed_T_BC = st.number_input(
                 "Температура измерения T (°C):",
                 value=float(st.session_state.fixed_T_BC),
-                step=10.0, format="%.1f"
+                step=10.0, format="%.1f",
+                key='fixed_T_BC_input'
             )
+            st.session_state.fixed_T_BC = fixed_T_BC
 
         st.divider()
         st.header("2. Газовая атмосфера")
 
-        # --- Воздух ---
+        air_varies = (mode == 'B')
+        fuel_varies = (mode == 'C')
+
+        # ---------- Воздух ----------
         st.subheader("Воздух (катод)")
-        air_varies = (mode == 'B')   # p'H2O задаётся данными
 
         if air_varies:
-            st.info("p'H₂O задаётся в загружаемых данных "
-                    "(ось X). Поля ввода отключены для режима B.")
+            st.info("p'H₂O задаётся в загружаемых данных (ось X). "
+                    "Поля ввода отключены для режима B.")
             air_pH2O = np.nan
         else:
             air_mode = st.radio(
@@ -922,13 +950,14 @@ def main():
             st.session_state.air_pH2O_mode = air_mode
 
             if air_mode == 'bubbler':
-                st.session_state.air_bubbler_T = st.number_input(
+                air_T = st.number_input(
                     "T барботёра воздуха (°C):",
                     value=float(st.session_state.air_bubbler_T),
                     min_value=0.0, max_value=100.0, step=1.0,
                     key='air_bubbler_T_input'
                 )
-                air_pH2O = pH2O_from_bubbler(st.session_state.air_bubbler_T)
+                st.session_state.air_bubbler_T = air_T
+                air_pH2O = pH2O_from_bubbler(air_T)
                 st.caption(f"→ p'H₂O = {air_pH2O:.5f}")
             else:
                 air_pH2O = st.number_input(
@@ -939,14 +968,14 @@ def main():
                 )
                 st.session_state.air_pH2O_direct = air_pH2O
 
-        # --- Топливо ---
+        # ---------- Топливо ----------
         st.subheader("Топливо (анод)")
-        fuel_varies = (mode == 'C')   # p''H2O задаётся данными
 
         if fuel_varies:
-            st.info("p''H₂O задаётся в загружаемых данных "
-                    "(ось X). Поля ввода отключены для режима C.")
+            st.info("p''H₂O задаётся в загружаемых данных (ось X). "
+                    "Поля ввода отключены для режима C.")
             fuel_pH2O = np.nan
+            fuel_H2_fraction = 1.0   # в режиме C топливо чистое H2, разбавление не задаётся
         else:
             fuel_mode = st.radio(
                 "Задание p''H₂O:",
@@ -958,13 +987,14 @@ def main():
             st.session_state.fuel_pH2O_mode = fuel_mode
 
             if fuel_mode == 'bubbler':
-                st.session_state.fuel_bubbler_T = st.number_input(
+                fuel_T = st.number_input(
                     "T барботёра топлива (°C):",
                     value=float(st.session_state.fuel_bubbler_T),
                     min_value=0.0, max_value=100.0, step=1.0,
                     key='fuel_bubbler_T_input'
                 )
-                fuel_pH2O = pH2O_from_bubbler(st.session_state.fuel_bubbler_T)
+                st.session_state.fuel_bubbler_T = fuel_T
+                fuel_pH2O = pH2O_from_bubbler(fuel_T)
                 st.caption(f"→ p''H₂O = {fuel_pH2O:.5f}")
             else:
                 fuel_pH2O = st.number_input(
@@ -975,47 +1005,66 @@ def main():
                 )
                 st.session_state.fuel_pH2O_direct = fuel_pH2O
 
-            st.session_state.fuel_H2_fraction = st.slider(
+            fuel_H2_fraction = st.slider(
                 "Исходная мольная доля H₂ в сухом топливе (остальное — inert):",
                 min_value=0.01, max_value=1.0,
                 value=float(st.session_state.fuel_H2_fraction),
                 step=0.01,
+                key='fuel_H2_fraction_slider',
                 help="1.0 = чистый H₂. Если < 1 — разбавление инертным газом."
             )
+            st.session_state.fuel_H2_fraction = fuel_H2_fraction
 
         st.divider()
         st.header("3. Параметры перебора (сценарий ❸)")
-        st.session_state.grid_step = st.select_slider(
+        grid_step = st.select_slider(
             "Шаг сетки по ti и tH:",
             options=[0.005, 0.01, 0.02, 0.05],
-            value=st.session_state.grid_step
+            value=st.session_state.grid_step,
+            key='grid_step_slider'
         )
-        st.session_state.tolerance_mode = st.radio(
+        st.session_state.grid_step = grid_step
+
+        tolerance_mode = st.radio(
             "Допуск δ:",
             options=['auto', 'manual'],
             format_func=lambda x: 'Автоматически' if x == 'auto' else 'Вручную',
-            index=0 if st.session_state.tolerance_mode == 'auto' else 1
+            index=0 if st.session_state.tolerance_mode == 'auto' else 1,
+            key='tol_mode_radio'
         )
-        if st.session_state.tolerance_mode == 'auto':
-            st.session_state.min_solutions = st.number_input(
+        st.session_state.tolerance_mode = tolerance_mode
+
+        if tolerance_mode == 'auto':
+            min_solutions = st.number_input(
                 "Минимум решений:",
                 min_value=1, max_value=500,
                 value=int(st.session_state.min_solutions),
-                step=1
+                step=1,
+                key='min_sol_input'
             )
-            st.session_state.max_tolerance_mV = st.number_input(
+            st.session_state.min_solutions = min_solutions
+
+            max_tolerance_mV = st.number_input(
                 "Верхняя граница δ (мВ):",
                 min_value=1.0, max_value=500.0,
                 value=float(st.session_state.max_tolerance_mV),
-                step=1.0
+                step=1.0,
+                key='max_tol_input'
             )
+            st.session_state.max_tolerance_mV = max_tolerance_mV
+
+            tolerance_value_mV = st.session_state.tolerance_value_mV
         else:
-            st.session_state.tolerance_value_mV = st.number_input(
+            tolerance_value_mV = st.number_input(
                 "δ (мВ):",
                 min_value=0.1, max_value=500.0,
                 value=float(st.session_state.tolerance_value_mV),
-                step=0.5
+                step=0.5,
+                key='tol_value_input'
             )
+            st.session_state.tolerance_value_mV = tolerance_value_mV
+            min_solutions = st.session_state.min_solutions
+            max_tolerance_mV = st.session_state.max_tolerance_mV
 
         st.divider()
         st.header("4. Данные OCV")
@@ -1055,12 +1104,10 @@ def main():
 0.12\t0.799
 0.17\t0.780"""
 
-        data_text = ""
         if data_option == 'Пример':
-            data_text = x_example
             if st.button("Загрузить пример", key='load_example'):
                 try:
-                    raw = parse_data_cached(data_text)
+                    raw = parse_data_cached(x_example)
                     st.session_state.experimental_data = raw
                     st.session_state.data_loaded = True
                     st.session_state.analysis_done = False
@@ -1070,7 +1117,8 @@ def main():
         elif data_option == 'Вручную':
             data_text = st.text_area(
                 f"Введите данные ({x_help}):",
-                value=x_example, height=200
+                value=x_example, height=200,
+                key='manual_data_input'
             )
             if st.button("Загрузить данные", key='load_manual'):
                 try:
@@ -1083,7 +1131,8 @@ def main():
                     st.error(f"Ошибка: {e}")
         else:
             uploaded = st.file_uploader("Загрузите файл (txt/csv/dat)",
-                                       type=['txt', 'csv', 'dat'])
+                                       type=['txt', 'csv', 'dat'],
+                                       key='file_uploader')
             if uploaded is not None:
                 try:
                     raw = parse_data_cached(uploaded.getvalue().decode())
@@ -1094,7 +1143,23 @@ def main():
                 except Exception as e:
                     st.error(f"Ошибка: {e}")
 
+        # ---- Итоговое подтверждение входных параметров перед запуском ----
         st.divider()
+        st.subheader("📌 Итоговые параметры расчёта")
+        summary = {
+            'Режим': mode,
+            'T (фиксир.) для B/C': fixed_T_BC if fixed_T_BC is not None else '—',
+            'p\'H₂O воздуха': air_pH2O if air_pH2O is not None and np.isfinite(air_pH2O) else 'из данных',
+            'p\'\'H₂O топлива': fuel_pH2O if fuel_pH2O is not None and np.isfinite(fuel_pH2O) else 'из данных',
+            'Доля H₂ в топливе': fuel_H2_fraction,
+            'Шаг сетки': grid_step,
+            'δ режим': tolerance_mode,
+            'δ (мВ)': tolerance_value_mV if tolerance_mode == 'manual' else 'авто',
+            'min решений': min_solutions,
+            'max δ (мВ)': max_tolerance_mV,
+        }
+        st.table(pd.DataFrame([summary]).T.rename(columns={0: 'значение'}))
+
         if st.button("🚀 Запустить анализ", type="primary", use_container_width=True):
             if st.session_state.experimental_data is None:
                 st.error("Сначала загрузите данные!")
@@ -1103,16 +1168,16 @@ def main():
                     t0 = time.time()
                     results = run_analysis(
                         data=st.session_state.experimental_data,
-                        mode=st.session_state.mode,
-                        fixed_T_BC=st.session_state.fixed_T_BC,
+                        mode=mode,
+                        fixed_T_BC=(fixed_T_BC if fixed_T_BC is not None else np.nan),
                         air_pH2O=air_pH2O,
                         fuel_pH2O=fuel_pH2O,
-                        fuel_H2_fraction=st.session_state.fuel_H2_fraction,
-                        grid_step=st.session_state.grid_step,
-                        tolerance_mode=st.session_state.tolerance_mode,
-                        tolerance_value_mV=st.session_state.tolerance_value_mV,
-                        min_solutions=st.session_state.min_solutions,
-                        max_tolerance_mV=st.session_state.max_tolerance_mV
+                        fuel_H2_fraction=fuel_H2_fraction,
+                        grid_step=grid_step,
+                        tolerance_mode=tolerance_mode,
+                        tolerance_value_mV=tolerance_value_mV,
+                        min_solutions=min_solutions,
+                        max_tolerance_mV=max_tolerance_mV
                     )
                     st.session_state.results = results
                     st.session_state.analysis_done = True
@@ -1144,13 +1209,14 @@ def main():
 
         st.header("📊 Результаты анализа")
 
-        tab_main, tab_s1, tab_s2, tab_s3, tab_te, tab_maps, tab_tables = st.tabs([
+        tab_main, tab_s1, tab_s2, tab_s3, tab_te, tab_maps, tab_diag, tab_tables = st.tabs([
             "🔷 Сводный график",
             "❶ Сценарий H⁺+e⁻",
             "❷ Сценарий O²⁻+H⁺",
             "❸ Сценарий смешанный",
             "🔌 te (электронный)",
             "🗺️ Карты решений",
+            "🔬 Диагностика",
             "📑 Таблицы"
         ])
 
@@ -1184,18 +1250,10 @@ def main():
                     'EO (V)': s['EO'],
                     'EH (V)': s['EH'],
                     'EH2O (V)': s['EH2O'],
-                    'EH−EO (V)': s['EH'] - s['EO'],
-                    'Emeas−EO (V)': s['OCV'] - s['EO'],
                     'δ (мВ)': s['tolerance_V'] * 1e3,
                     'N решений': len(s['solutions'])
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-            st.markdown(
-                "**Диагностика.** Для сценария ❷ должно быть: "
-                "`tH = (Emeas − EO)/(EH − EO)`. "
-                "Проверь, что EO < Emeas < EH, тогда tH ∈ (0,1)."
-            )
 
         with tab_te:
             fig_te = create_te_plot(res, style)
@@ -1238,38 +1296,67 @@ def main():
                 f"найдено решений: **{len(sols)}**"
             )
 
-        with tab_tables:
-            st.subheader("Термодинамические ЭДС и числа переноса по точкам")
+        with tab_diag:
+            st.subheader("🔬 Диагностика входных параметров и промежуточных величин")
+            st.markdown(
+                "Эта таблица показывает, **что реально уходит в расчёт** для каждой "
+                "точки. Сравни колонки `p'H2`, `p''H2`, `EO`, `EH` с ручным расчётом "
+                "— они должны совпадать."
+            )
 
+            dbg_rows = []
+            for i, s in enumerate(res['s3_grids']):
+                dbg_rows.append({
+                    'точка': i + 1,
+                    'x (вход)': res['xs'][i],
+                    'OCV (V)': s['OCV'],
+                    'T_C (°C)': s['T_C'],
+                    "p'H₂O (возд)": s['air_pH2O_used'],
+                    "p''H₂O (топл)": s['fuel_pH2O_used'],
+                    'H₂ frac': s['fuel_H2_fraction_used'],
+                    'K(T)': s['K'],
+                    "p'O₂": s['pO2_air'],
+                    "p'H₂": s['pH2_air'],
+                    "p''O₂": s['pO2_fuel'],
+                    "p''H₂": s['pH2_fuel'],
+                    'EO (V)': s['EO'],
+                    'EH (V)': s['EH'],
+                    'EH2O (V)': s['EH2O'],
+                    'Emeas − EO': s['OCV'] - s['EO'],
+                    'EH − EO': s['EH'] - s['EO'],
+                })
+            df_dbg = pd.DataFrame(dbg_rows)
+            st.dataframe(df_dbg, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("Резюме параметров запуска")
+            meta = {
+                'mode': res['mode'],
+                'fixed_T_BC': res['fixed_T_BC'],
+                'air_pH2O (вход)': res['air_pH2O'],
+                'fuel_pH2O (вход)': res['fuel_pH2O'],
+                'fuel_H2_fraction': res['fuel_H2_fraction'],
+                'grid_step': res['grid_step'],
+                'tolerance_mode': res['tolerance_mode'],
+                'tolerance_value_mV': res['tolerance_value_mV'],
+                'min_solutions': res['min_solutions'],
+                'max_tolerance_mV': res['max_tolerance_mV'],
+            }
+            st.table(pd.DataFrame([meta]).T.rename(columns={0: 'значение'}))
+
+        with tab_tables:
+            st.subheader("Числа переноса по точкам")
             rows = []
             for i in range(len(res['xs'])):
                 s1 = res['scenario1'][i]
                 s2 = res['scenario2'][i]
                 s3 = res['scenario3'][i]
-                grid = res['s3_grids'][i]
-
-                # Внутренняя диагностика сценария 2
-                EO = grid['EO']
-                EH = grid['EH']
-                EH2O = grid['EH2O']
-                Emeas = res['ocvs'][i]
-                dEH_EO = EH - EO
-                dEmeas_EO = Emeas - EO
-                tH_s2_manual = (dEmeas_EO / dEH_EO
-                                if abs(dEH_EO) > 1e-12 else np.nan)
-
                 rows.append({
                     'x': res['xs'][i],
-                    'OCV (V)': Emeas,
-                    'EO (V)': EO,
-                    'EH (V)': EH,
-                    'EH2O (V)': EH2O,
-                    'EH − EO (V)': dEH_EO,
-                    'Emeas − EO (V)': dEmeas_EO,
+                    'OCV (V)': res['ocvs'][i],
                     '❶ tH': s1['tH'] if s1 else np.nan,
                     '❶ te': s1['te'] if s1 else np.nan,
                     '❷ tH': s2['tH'] if s2 else np.nan,
-                    '❷ tH (проверка)': tH_s2_manual,
                     '❷ tO': s2['tO'] if s2 else np.nan,
                     '❸ tH_min': s3['tH_min'],
                     '❸ tH_max': s3['tH_max'],
@@ -1282,22 +1369,8 @@ def main():
                     '❸ N': s3['n_sol'],
                     '❸ δ (мВ)': s3['tolerance_V'] * 1e3
                 })
-
             df_res = pd.DataFrame(rows)
             st.dataframe(df_res, use_container_width=True)
-
-            st.markdown(
-                "**Как читать таблицу.**\n"
-                "- `EO (V)`, `EH (V)`, `EH2O (V)` — термодинамические ЭДС, "
-                "рассчитанные по текущим газовым условиям и температуре.\n"
-                "- `EH − EO` — знаменатель формулы сценария ❷.\n"
-                "- `Emeas − EO` — числитель формулы сценария ❷.\n"
-                "- `❷ tH (проверка)` — независимый пересчёт "
-                "`(Emeas − EO)/(EH − EO)` прямо из таблицы, "
-                "должен совпадать с `❷ tH`.\n"
-                "- Если `❷ tH` пусто (`NaN`), значит результат вышел за "
-                "пределы [0,1] или знаменатель близок к нулю."
-            )
 
             csv = df_res.to_csv(index=False)
             st.download_button("📥 Скачать CSV", csv,
