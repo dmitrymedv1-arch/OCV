@@ -498,6 +498,10 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     xs = results['xs']
     xlabel = _x_label(results['mode'])
 
+    # ЯВНО определяем границы оси X по данным
+    x_pad = 0.02 * (xs.max() - xs.min()) if xs.max() > xs.min() else 1.0
+    xlim = (xs.min() - x_pad, xs.max() + x_pad)
+
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharex=True)
     titles = ['tH (proton)', 'tO (oxide-ion)', 'tion = tH + tO']
 
@@ -508,26 +512,28 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     s3_tH_max = _extract_series(results, 's3_tH_max')
 
     ax = axes[0]
-    ax.plot(xs, s1_tH, 'o-', color=style['scenario1_color'],
-            markersize=5, linewidth=style['line_width'] - 0.5,
-            alpha=style['point_alpha'], label='Scenario ❶ (H⁺+e⁻)')
-    ax.plot(xs, s2_tH, 's-', color=style['scenario2_color'],
-            markersize=5, linewidth=style['line_width'] - 0.5,
-            alpha=style['point_alpha'], label='Scenario ❷ (O²⁻+H⁺)')
+    # Рисуем только если есть валидные точки
+    if (~np.isnan(s1_tH)).any():
+        ax.plot(xs, s1_tH, 'o-', color=style['scenario1_color'],
+                markersize=5, linewidth=style['line_width'] - 0.5,
+                alpha=style['point_alpha'], label='Scenario ❶ (H⁺+e⁻)')
+    if (~np.isnan(s2_tH)).any():
+        ax.plot(xs, s2_tH, 's-', color=style['scenario2_color'],
+                markersize=5, linewidth=style['line_width'] - 0.5,
+                alpha=style['point_alpha'], label='Scenario ❷ (O²⁻+H⁺)')
 
-    # Область сценария 3 (диапазон tH)
     valid = ~np.isnan(s3_tH_min) & ~np.isnan(s3_tH_max)
     if valid.any():
         ax.fill_between(xs, s3_tH_min, s3_tH_max,
                         color=style['scenario3_color'],
                         alpha=style['band_alpha'], label='Scenario ❸ range')
 
-    # Закраска совпадений tH между сценариями
     _plot_common_band(ax, xs, [s1_tH, s2_tH, s3_tH_min, s3_tH_max],
                       color=style['common_tH_color'], alpha=style['band_alpha'])
 
     ax.set_title(titles[0]); ax.set_ylabel('tH')
     ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(xlim)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.legend(loc='best', fontsize=8)
 
@@ -537,9 +543,10 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     s3_tO_max = _extract_series(results, 's3_tO_max')
 
     ax = axes[1]
-    ax.plot(xs, s2_tO, 's-', color=style['scenario2_color'],
-            markersize=5, linewidth=style['line_width'] - 0.5,
-            alpha=style['point_alpha'], label='Scenario ❷ (O²⁻+H⁺)')
+    if (~np.isnan(s2_tO)).any():
+        ax.plot(xs, s2_tO, 's-', color=style['scenario2_color'],
+                markersize=5, linewidth=style['line_width'] - 0.5,
+                alpha=style['point_alpha'], label='Scenario ❷ (O²⁻+H⁺)')
     if valid.any():
         ax.fill_between(xs, s3_tO_min, s3_tO_max,
                         color=style['scenario3_color'],
@@ -548,13 +555,13 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
                       color=style['common_tO_color'], alpha=style['band_alpha'])
     ax.set_title(titles[1]); ax.set_ylabel('tO')
     ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(xlim)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.legend(loc='best', fontsize=8)
 
     # --- tion ---
-    s1_tion = s1_tH.copy()          # tion = tH
+    s1_tion = s1_tH.copy()
     s2_tion = np.ones_like(xs)
-    # Маскируем точки, где сценарий 2 невалиден
     for i, s in enumerate(results['scenario2']):
         if s is None:
             s2_tion[i] = np.nan
@@ -562,12 +569,14 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     s3_ti_max = _extract_series(results, 's3_ti_max')
 
     ax = axes[2]
-    ax.plot(xs, s1_tion, 'o-', color=style['scenario1_color'],
-            markersize=5, linewidth=style['line_width'] - 0.5,
-            alpha=style['point_alpha'], label='Scenario ❶ (H⁺+e⁻)')
-    ax.plot(xs, s2_tion, 's-', color=style['scenario2_color'],
-            markersize=5, linewidth=style['line_width'] - 0.5,
-            alpha=style['point_alpha'], label='Scenario ❷ (O²⁻+H⁺)')
+    if (~np.isnan(s1_tion)).any():
+        ax.plot(xs, s1_tion, 'o-', color=style['scenario1_color'],
+                markersize=5, linewidth=style['line_width'] - 0.5,
+                alpha=style['point_alpha'], label='Scenario ❶ (H⁺+e⁻)')
+    if (~np.isnan(s2_tion)).any():
+        ax.plot(xs, s2_tion, 's-', color=style['scenario2_color'],
+                markersize=5, linewidth=style['line_width'] - 0.5,
+                alpha=style['point_alpha'], label='Scenario ❷ (O²⁻+H⁺)')
     if valid.any():
         ax.fill_between(xs, s3_ti_min, s3_ti_max,
                         color=style['scenario3_color'],
@@ -576,6 +585,7 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
                       color=style['common_ti_color'], alpha=style['band_alpha'])
     ax.set_title(titles[2]); ax.set_ylabel('tion')
     ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(xlim)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.legend(loc='best', fontsize=8)
 
@@ -628,30 +638,40 @@ def create_scenario_plot(results: Dict[str, Any], scenario_idx: int,
     xs = results['xs']
     xlabel = _x_label(results['mode'])
 
+    x_pad = 0.02 * (xs.max() - xs.min()) if xs.max() > xs.min() else 1.0
+    xlim = (xs.min() - x_pad, xs.max() + x_pad)
+
     fig, ax = plt.subplots(figsize=(7, 4.5))
+    has_data = False
 
     if scenario_idx == 1:
         tH = _extract_series(results, 'tH')
         tion = tH.copy()
         te = np.where(~np.isnan(tH), 1.0 - tH, np.nan)
-        ax.plot(xs, tH, 'o-', color=style['scenario1_color'],
-                markersize=6, linewidth=style['line_width'], label='tH')
-        ax.plot(xs, tion, '^--', color=style['scenario1_color'],
-                markersize=5, linewidth=style['line_width'] - 0.5,
-                alpha=0.7, label='tion = tH')
-        ax.plot(xs, te, 'v:', color=style['te_color'],
-                markersize=5, linewidth=style['line_width'] - 0.5,
-                label='te = 1 - tH')
+        if (~np.isnan(tH)).any():
+            ax.plot(xs, tH, 'o-', color=style['scenario1_color'],
+                    markersize=6, linewidth=style['line_width'], label='tH')
+            ax.plot(xs, tion, '^--', color=style['scenario1_color'],
+                    markersize=5, linewidth=style['line_width'] - 0.5,
+                    alpha=0.7, label='tion = tH')
+            ax.plot(xs, te, 'v:', color=style['te_color'],
+                    markersize=5, linewidth=style['line_width'] - 0.5,
+                    label='te = 1 - tH')
+            has_data = True
         ax.set_title('Scenario ❶: H⁺ + e⁻')
+
     elif scenario_idx == 2:
         tH = _extract_series(results, 's2_tH')
         tO = _extract_series(results, 's2_tO')
-        ax.plot(xs, tH, 's-', color=style['scenario2_color'],
-                markersize=6, linewidth=style['line_width'], label='tH')
-        ax.plot(xs, tO, 'D--', color=style['scenario2_color'],
-                markersize=5, linewidth=style['line_width'] - 0.5,
-                alpha=0.7, label='tO')
+        if (~np.isnan(tH)).any():
+            ax.plot(xs, tH, 's-', color=style['scenario2_color'],
+                    markersize=6, linewidth=style['line_width'], label='tH')
+            ax.plot(xs, tO, 'D--', color=style['scenario2_color'],
+                    markersize=5, linewidth=style['line_width'] - 0.5,
+                    alpha=0.7, label='tO')
+            has_data = True
         ax.set_title('Scenario ❷: O²⁻ + H⁺ (tion = 1, te = 0)')
+
     else:
         ti_min = _extract_series(results, 's3_ti_min')
         ti_max = _extract_series(results, 's3_ti_max')
@@ -659,8 +679,6 @@ def create_scenario_plot(results: Dict[str, Any], scenario_idx: int,
         tH_max = _extract_series(results, 's3_tH_max')
         tO_min = _extract_series(results, 's3_tO_min')
         tO_max = _extract_series(results, 's3_tO_max')
-        te_min = _extract_series(results, 's3_te_min')
-        te_max = _extract_series(results, 's3_te_max')
 
         valid = ~np.isnan(ti_min)
         if valid.any():
@@ -676,13 +694,23 @@ def create_scenario_plot(results: Dict[str, Any], scenario_idx: int,
             ax.plot(xs, (tO_min + tO_max) / 2, 's-',
                     color=style['common_tO_color'], markersize=5,
                     linewidth=style['line_width'] - 0.5, label='tO (mid)')
+            has_data = True
         ax.set_title('Scenario ❸: O²⁻ + H⁺ + e⁻ (range)')
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel('Transport number')
     ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(xlim)
+
+    if not has_data:
+        ax.text(0.5, 0.5, 'Нет физически допустимых точек\nдля этого сценария',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=11, fontweight='bold', color='gray',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+
     ax.grid(True, alpha=0.3, linestyle='--')
-    ax.legend(loc='best', fontsize=9)
+    if has_data:
+        ax.legend(loc='best', fontsize=9)
 
     plt.tight_layout()
     fig.set_dpi(600)
@@ -694,35 +722,50 @@ def create_te_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.Figure
     xs = results['xs']
     xlabel = _x_label(results['mode'])
 
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    x_pad = 0.02 * (xs.max() - xs.min()) if xs.max() > xs.min() else 1.0
+    xlim = (xs.min() - x_pad, xs.max() + x_pad)
 
-    # Сценарий 1: te = 1 - tH
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    has_data = False
+
     tH1 = _extract_series(results, 'tH')
     te1 = np.where(~np.isnan(tH1), 1.0 - tH1, np.nan)
-    ax.plot(xs, te1, 'o-', color=style['scenario1_color'],
-            markersize=6, linewidth=style['line_width'],
-            label='te, Scenario ❶')
+    if (~np.isnan(te1)).any():
+        ax.plot(xs, te1, 'o-', color=style['scenario1_color'],
+                markersize=6, linewidth=style['line_width'],
+                label='te, Scenario ❶')
+        has_data = True
 
-    # Сценарий 2: te = 0 (валидно только где tH определён)
     tH2 = _extract_series(results, 's2_tH')
     te2 = np.where(~np.isnan(tH2), 0.0, np.nan)
-    ax.plot(xs, te2, 's-', color=style['scenario2_color'],
-            markersize=6, linewidth=style['line_width'],
-            label='te, Scenario ❷ (=0)')
+    if (~np.isnan(te2)).any():
+        ax.plot(xs, te2, 's-', color=style['scenario2_color'],
+                markersize=6, linewidth=style['line_width'],
+                label='te, Scenario ❷ (=0)')
+        has_data = True
 
-    # Сценарий 3: диапазон te
     te_min = _extract_series(results, 's3_te_min')
     te_max = _extract_series(results, 's3_te_max')
     if (~np.isnan(te_min)).any():
         ax.fill_between(xs, te_min, te_max, color=style['scenario3_color'],
                         alpha=style['band_alpha'], label='te, Scenario ❸ range')
+        has_data = True
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel('te')
     ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(xlim)
     ax.set_title('Electronic transport number')
+
+    if not has_data:
+        ax.text(0.5, 0.5, 'Нет физически допустимых точек',
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=11, fontweight='bold', color='gray',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+
     ax.grid(True, alpha=0.3, linestyle='--')
-    ax.legend(loc='best', fontsize=9)
+    if has_data:
+        ax.legend(loc='best', fontsize=9)
 
     plt.tight_layout()
     fig.set_dpi(600)
