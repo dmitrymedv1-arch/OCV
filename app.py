@@ -273,8 +273,7 @@ def scenario_3_grid(Emeas: float, EO: float, EH2O: float,
     """
     Сценарий ❸: численный перебор (ti, tH) с шагом step.
     Условие: Emeas ≈ ti*EO + tH*EH2O, ti = tion, tO = ti - tH >= 0, ti <= 1.
-    Возвращает список точек (ti, tH, tO, te, err) для которых ti*EO + tH*EH2O
-    ближе всего к Emeas при заданном шаге (для карты решений отбираются позже с δ).
+    Возвращает список точек (ti, tH, tO, te, err).
     """
     if np.isnan(EO) or np.isnan(EH2O):
         return []
@@ -318,7 +317,6 @@ def auto_select_tolerance(Emeas: float, EO: float, EH2O: float,
     if not sols:
         return max_tol
     errs = np.array(sorted(abs(s['err']) for s in sols))
-    # минимальный δ, при котором число решений >= min_solutions
     if min_solutions <= 0:
         min_solutions = 1
     if min_solutions > len(errs):
@@ -356,7 +354,6 @@ def run_analysis(data: np.ndarray,
     ocvs = data[:, 1]
 
     scenario1, scenario2, scenario3 = [], [], []
-    # для сценария 3: словарь на точку со списком решений
     s3_grids = []
 
     for x, ocv in zip(xs, ocvs):
@@ -367,12 +364,12 @@ def run_analysis(data: np.ndarray,
             p_fuel = fuel_pH2O
         elif mode == 'B':
             T_C = float(fixed_T_BC)
-            p_air = float(x)          # меняется влажность воздуха
-            p_fuel = fuel_pH2O
+            p_air = float(x)          # влажность воздуха из данных
+            p_fuel = fuel_pH2O        # фиксированная влажность топлива
         elif mode == 'C':
             T_C = float(fixed_T_BC)
-            p_air = air_pH2O
-            p_fuel = float(x)         # меняется влажность топлива
+            p_air = air_pH2O          # фиксированная влажность воздуха
+            p_fuel = float(x)         # влажность топлива из данных
         else:
             T_C, p_air, p_fuel = float(x), air_pH2O, fuel_pH2O
 
@@ -408,7 +405,6 @@ def run_analysis(data: np.ndarray,
             'solutions': sols
         })
 
-        # Сводные статистики по точке (для графиков): берём диапазон ti и tH
         if sols:
             ti_arr = np.array([s['ti'] for s in sols])
             tH_arr = np.array([s['tH'] for s in sols])
@@ -454,7 +450,7 @@ def run_analysis(data: np.ndarray,
 
 
 # ============================================
-# ГРАФИКИ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ГРАФИКОВ
 # ============================================
 
 def _x_label(mode: str) -> str:
@@ -484,7 +480,6 @@ def _extract_series(results: Dict[str, Any], key: str) -> np.ndarray:
         return out
 
     if key.startswith('s3_'):
-        # s3_ti_min / s3_ti_max и т.п.
         field = key[3:]
         for i, s in enumerate(results['scenario3']):
             out[i] = s.get(field, np.nan)
@@ -492,6 +487,42 @@ def _extract_series(results: Dict[str, Any], key: str) -> np.ndarray:
 
     return out
 
+
+def _plot_common_band(ax, xs, arrays, color, alpha):
+    """Закрашивает область пересечения [min, max] по всем непустым массивам."""
+    mins, maxs = [], []
+    for arr in arrays:
+        v = arr[~np.isnan(arr)]
+        if v.size:
+            mins.append(arr)
+            maxs.append(arr)
+    if not mins:
+        return
+    stack_min = np.vstack(mins)
+    stack_max = np.vstack(maxs)
+    lo = np.nanmax(stack_min, axis=0)
+    hi = np.nanmin(stack_max, axis=0)
+    mask = (~np.isnan(lo)) & (~np.isnan(hi)) & (hi >= lo)
+    if not mask.any():
+        return
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        return
+    splits = np.where(np.diff(idx) > 1)[0]
+    segments = np.split(idx, splits + 1)
+    for seg in segments:
+        if seg.size < 2:
+            continue
+        x_seg = xs[seg]
+        lo_seg = lo[seg]
+        hi_seg = hi[seg]
+        ax.fill_between(x_seg, lo_seg, hi_seg, color=color,
+                        alpha=alpha, zorder=1)
+
+
+# ============================================
+# ГРАФИКИ
+# ============================================
 
 def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.Figure:
     """Сводный график: tH, tO, tion по трём сценариям с закраской совпадений."""
@@ -512,7 +543,6 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     s3_tH_max = _extract_series(results, 's3_tH_max')
 
     ax = axes[0]
-    # Рисуем только если есть валидные точки
     if (~np.isnan(s1_tH)).any():
         ax.plot(xs, s1_tH, 'o-', color=style['scenario1_color'],
                 markersize=5, linewidth=style['line_width'] - 0.5,
@@ -595,41 +625,6 @@ def create_overview_plot(results: Dict[str, Any], style: Dict[str, Any]) -> plt.
     plt.tight_layout()
     fig.set_dpi(600)
     return fig
-
-
-def _plot_common_band(ax, xs, arrays, color, alpha):
-    """Закрашивает область пересечения [min, max] по всем непустым массивам."""
-    mins, maxs = [], []
-    for arr in arrays:
-        v = arr[~np.isnan(arr)]
-        if v.size:
-            mins.append(arr)
-            maxs.append(arr)
-    if not mins:
-        return
-    # построчно min из максимумов и max из минимумов
-    stack_min = np.vstack(mins)
-    stack_max = np.vstack(maxs)
-    lo = np.nanmax(stack_min, axis=0)
-    hi = np.nanmin(stack_max, axis=0)
-    mask = (~np.isnan(lo)) & (~np.isnan(hi)) & (hi >= lo)
-    if not mask.any():
-        return
-    # Разрываем на непрерывные сегменты
-    idx = np.where(mask)[0]
-    if idx.size == 0:
-        return
-    # строим отдельные polygon-сегменты для непрерывных участков
-    splits = np.where(np.diff(idx) > 1)[0]
-    segments = np.split(idx, splits + 1)
-    for seg in segments:
-        if seg.size < 2:
-            continue
-        x_seg = xs[seg]
-        lo_seg = lo[seg]
-        hi_seg = hi[seg]
-        ax.fill_between(x_seg, lo_seg, hi_seg, color=color,
-                        alpha=alpha, zorder=1)
 
 
 def create_scenario_plot(results: Dict[str, Any], scenario_idx: int,
@@ -787,7 +782,6 @@ def create_decision_map_scatter(grid_solutions: List[Dict[str, float]],
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label('te = 1 - ti', fontweight='bold')
 
-    # Область tO = ti - tH >= 0
     ax.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.5,
             label='tO = 0 boundary')
     ax.fill_between([0, 1], [0, 1], [1, 1], color='gray',
@@ -817,12 +811,10 @@ def create_decision_map_contour(EO: float, EH2O: float, Emeas: float,
     tH_vals = np.linspace(0, 1, 200)
     TI, TH = np.meshgrid(ti_vals, tH_vals)
     TO = TI - TH
-    # Маска: tO >= 0
     mask = TO >= -1e-9
     E_model = TI * EO + TH * EH2O
     E_model_masked = np.where(mask, E_model, np.nan)
 
-    # Уровни
     levels = np.linspace(np.nanmin(E_model_masked),
                         np.nanmax(E_model_masked), 15)
     cs = ax.contourf(TI, TH, E_model_masked, levels=levels,
@@ -830,12 +822,10 @@ def create_decision_map_contour(EO: float, EH2O: float, Emeas: float,
     cbar = fig.colorbar(cs, ax=ax)
     cbar.set_label('E_model (V)', fontweight='bold')
 
-    # Линия уровня E = Emeas
     cs2 = ax.contour(TI, TH, E_model_masked, levels=[Emeas],
                     colors='black', linewidths=2.5)
     ax.clabel(cs2, fmt='E = %.3f V', fontsize=9)
 
-    # Область tO < 0
     ax.fill_between([0, 1], [0, 1], [1, 1], color='gray', alpha=0.25,
                     hatch='//', label='tO < 0 (forbidden)')
     ax.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.7)
@@ -915,69 +905,83 @@ def main():
 
         # --- Воздух ---
         st.subheader("Воздух (катод)")
-        air_mode = st.radio(
-            "Задание p'H₂O:",
-            options=['bubbler', 'direct'],
-            format_func=lambda x: 'Через T барботёра' if x == 'bubbler' else 'Напрямую',
-            index=0 if st.session_state.air_pH2O_mode == 'bubbler' else 1,
-            key='air_mode_radio'
-        )
-        st.session_state.air_pH2O_mode = air_mode
+        air_varies = (mode == 'B')   # p'H2O задаётся данными
 
-        if air_mode == 'bubbler':
-            st.session_state.air_bubbler_T = st.number_input(
-                "T барботёра воздуха (°C):",
-                value=float(st.session_state.air_bubbler_T),
-                min_value=0.0, max_value=100.0, step=1.0,
-                key='air_bubbler_T_input'
-            )
-            air_pH2O = pH2O_from_bubbler(st.session_state.air_bubbler_T)
-            st.caption(f"→ p'H₂O = {air_pH2O:.5f}")
+        if air_varies:
+            st.info("p'H₂O задаётся в загружаемых данных "
+                    "(ось X). Поля ввода отключены для режима B.")
+            air_pH2O = np.nan
         else:
-            air_pH2O = st.number_input(
-                "p'H₂O (воздух):",
-                value=float(st.session_state.air_pH2O_direct),
-                min_value=1e-6, max_value=0.99, step=0.001,
-                format="%.5f", key='air_pH2O_direct_input'
+            air_mode = st.radio(
+                "Задание p'H₂O:",
+                options=['bubbler', 'direct'],
+                format_func=lambda x: 'Через T барботёра' if x == 'bubbler' else 'Напрямую',
+                index=0 if st.session_state.air_pH2O_mode == 'bubbler' else 1,
+                key='air_mode_radio'
             )
-            st.session_state.air_pH2O_direct = air_pH2O
+            st.session_state.air_pH2O_mode = air_mode
+
+            if air_mode == 'bubbler':
+                st.session_state.air_bubbler_T = st.number_input(
+                    "T барботёра воздуха (°C):",
+                    value=float(st.session_state.air_bubbler_T),
+                    min_value=0.0, max_value=100.0, step=1.0,
+                    key='air_bubbler_T_input'
+                )
+                air_pH2O = pH2O_from_bubbler(st.session_state.air_bubbler_T)
+                st.caption(f"→ p'H₂O = {air_pH2O:.5f}")
+            else:
+                air_pH2O = st.number_input(
+                    "p'H₂O (воздух):",
+                    value=float(st.session_state.air_pH2O_direct),
+                    min_value=1e-6, max_value=0.99, step=0.001,
+                    format="%.5f", key='air_pH2O_direct_input'
+                )
+                st.session_state.air_pH2O_direct = air_pH2O
 
         # --- Топливо ---
         st.subheader("Топливо (анод)")
-        fuel_mode = st.radio(
-            "Задание p''H₂O:",
-            options=['bubbler', 'direct'],
-            format_func=lambda x: 'Через T барботёра' if x == 'bubbler' else 'Напрямую',
-            index=0 if st.session_state.fuel_pH2O_mode == 'bubbler' else 1,
-            key='fuel_mode_radio'
-        )
-        st.session_state.fuel_pH2O_mode = fuel_mode
+        fuel_varies = (mode == 'C')   # p''H2O задаётся данными
 
-        if fuel_mode == 'bubbler':
-            st.session_state.fuel_bubbler_T = st.number_input(
-                "T барботёра топлива (°C):",
-                value=float(st.session_state.fuel_bubbler_T),
-                min_value=0.0, max_value=100.0, step=1.0,
-                key='fuel_bubbler_T_input'
-            )
-            fuel_pH2O = pH2O_from_bubbler(st.session_state.fuel_bubbler_T)
-            st.caption(f"→ p''H₂O = {fuel_pH2O:.5f}")
+        if fuel_varies:
+            st.info("p''H₂O задаётся в загружаемых данных "
+                    "(ось X). Поля ввода отключены для режима C.")
+            fuel_pH2O = np.nan
         else:
-            fuel_pH2O = st.number_input(
-                "p''H₂O (топливо):",
-                value=float(st.session_state.fuel_pH2O_direct),
-                min_value=1e-6, max_value=0.99, step=0.001,
-                format="%.5f", key='fuel_pH2O_direct_input'
+            fuel_mode = st.radio(
+                "Задание p''H₂O:",
+                options=['bubbler', 'direct'],
+                format_func=lambda x: 'Через T барботёра' if x == 'bubbler' else 'Напрямую',
+                index=0 if st.session_state.fuel_pH2O_mode == 'bubbler' else 1,
+                key='fuel_mode_radio'
             )
-            st.session_state.fuel_pH2O_direct = fuel_pH2O
+            st.session_state.fuel_pH2O_mode = fuel_mode
 
-        st.session_state.fuel_H2_fraction = st.slider(
-            "Исходная мольная доля H₂ в сухом топливе (остальное — inert):",
-            min_value=0.01, max_value=1.0,
-            value=float(st.session_state.fuel_H2_fraction),
-            step=0.01,
-            help="1.0 = чистый H₂. Если < 1 - разбавление инертным газом."
-        )
+            if fuel_mode == 'bubbler':
+                st.session_state.fuel_bubbler_T = st.number_input(
+                    "T барботёра топлива (°C):",
+                    value=float(st.session_state.fuel_bubbler_T),
+                    min_value=0.0, max_value=100.0, step=1.0,
+                    key='fuel_bubbler_T_input'
+                )
+                fuel_pH2O = pH2O_from_bubbler(st.session_state.fuel_bubbler_T)
+                st.caption(f"→ p''H₂O = {fuel_pH2O:.5f}")
+            else:
+                fuel_pH2O = st.number_input(
+                    "p''H₂O (топливо):",
+                    value=float(st.session_state.fuel_pH2O_direct),
+                    min_value=1e-6, max_value=0.99, step=0.001,
+                    format="%.5f", key='fuel_pH2O_direct_input'
+                )
+                st.session_state.fuel_pH2O_direct = fuel_pH2O
+
+            st.session_state.fuel_H2_fraction = st.slider(
+                "Исходная мольная доля H₂ в сухом топливе (остальное — inert):",
+                min_value=0.01, max_value=1.0,
+                value=float(st.session_state.fuel_H2_fraction),
+                step=0.01,
+                help="1.0 = чистый H₂. Если < 1 — разбавление инертным газом."
+            )
 
         st.divider()
         st.header("3. Параметры перебора (сценарий ❸)")
@@ -1140,7 +1144,6 @@ def main():
 
         st.header("📊 Результаты анализа")
 
-        # Сводные графики
         tab_main, tab_s1, tab_s2, tab_s3, tab_te, tab_maps, tab_tables = st.tabs([
             "🔷 Сводный график",
             "❶ Сценарий H⁺+e⁻",
@@ -1172,7 +1175,6 @@ def main():
             fig3 = create_scenario_plot(res, 3, style)
             st.pyplot(fig3)
 
-            # Инфо о δ по каждой точке
             st.subheader("Допуск δ и число решений по точкам")
             rows = []
             for i, s in enumerate(res['s3_grids']):
@@ -1261,7 +1263,6 @@ def main():
                               file_name="transport_numbers.csv",
                               mime="text/csv")
 
-        # Экспорт графиков
         st.divider()
         st.subheader("📥 Экспорт графиков (PNG, 600 DPI)")
 
