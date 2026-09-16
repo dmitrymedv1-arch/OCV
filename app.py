@@ -1184,10 +1184,18 @@ def main():
                     'EO (V)': s['EO'],
                     'EH (V)': s['EH'],
                     'EH2O (V)': s['EH2O'],
+                    'EH−EO (V)': s['EH'] - s['EO'],
+                    'Emeas−EO (V)': s['OCV'] - s['EO'],
                     'δ (мВ)': s['tolerance_V'] * 1e3,
                     'N решений': len(s['solutions'])
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+            st.markdown(
+                "**Диагностика.** Для сценария ❷ должно быть: "
+                "`tH = (Emeas − EO)/(EH − EO)`. "
+                "Проверь, что EO < Emeas < EH, тогда tH ∈ (0,1)."
+            )
 
         with tab_te:
             fig_te = create_te_plot(res, style)
@@ -1231,18 +1239,37 @@ def main():
             )
 
         with tab_tables:
-            st.subheader("Числа переноса по точкам")
+            st.subheader("Термодинамические ЭДС и числа переноса по точкам")
+
             rows = []
             for i in range(len(res['xs'])):
                 s1 = res['scenario1'][i]
                 s2 = res['scenario2'][i]
                 s3 = res['scenario3'][i]
+                grid = res['s3_grids'][i]
+
+                # Внутренняя диагностика сценария 2
+                EO = grid['EO']
+                EH = grid['EH']
+                EH2O = grid['EH2O']
+                Emeas = res['ocvs'][i]
+                dEH_EO = EH - EO
+                dEmeas_EO = Emeas - EO
+                tH_s2_manual = (dEmeas_EO / dEH_EO
+                                if abs(dEH_EO) > 1e-12 else np.nan)
+
                 rows.append({
                     'x': res['xs'][i],
-                    'OCV (V)': res['ocvs'][i],
+                    'OCV (V)': Emeas,
+                    'EO (V)': EO,
+                    'EH (V)': EH,
+                    'EH2O (V)': EH2O,
+                    'EH − EO (V)': dEH_EO,
+                    'Emeas − EO (V)': dEmeas_EO,
                     '❶ tH': s1['tH'] if s1 else np.nan,
                     '❶ te': s1['te'] if s1 else np.nan,
                     '❷ tH': s2['tH'] if s2 else np.nan,
+                    '❷ tH (проверка)': tH_s2_manual,
                     '❷ tO': s2['tO'] if s2 else np.nan,
                     '❸ tH_min': s3['tH_min'],
                     '❸ tH_max': s3['tH_max'],
@@ -1255,8 +1282,22 @@ def main():
                     '❸ N': s3['n_sol'],
                     '❸ δ (мВ)': s3['tolerance_V'] * 1e3
                 })
+
             df_res = pd.DataFrame(rows)
             st.dataframe(df_res, use_container_width=True)
+
+            st.markdown(
+                "**Как читать таблицу.**\n"
+                "- `EO (V)`, `EH (V)`, `EH2O (V)` — термодинамические ЭДС, "
+                "рассчитанные по текущим газовым условиям и температуре.\n"
+                "- `EH − EO` — знаменатель формулы сценария ❷.\n"
+                "- `Emeas − EO` — числитель формулы сценария ❷.\n"
+                "- `❷ tH (проверка)` — независимый пересчёт "
+                "`(Emeas − EO)/(EH − EO)` прямо из таблицы, "
+                "должен совпадать с `❷ tH`.\n"
+                "- Если `❷ tH` пусто (`NaN`), значит результат вышел за "
+                "пределы [0,1] или знаменатель близок к нулю."
+            )
 
             csv = df_res.to_csv(index=False)
             st.download_button("📥 Скачать CSV", csv,
